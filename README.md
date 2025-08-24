@@ -45,6 +45,7 @@
 
     ```bash
     python src/capture.py --input data/input/your_video.mp4 --output data/output/result.mp4 --output-glb data/output/animation.glb --model-complexity 2
+    python src/capture.py --input data/input/your_video.mp4 --output data/output/result.mp4 --output-glb data/output/animation.glb
     ```
     - `--input`: 入力ビデオファイルのパスを指定します。
     - `--output`: 骨格が描画された結果を保存する出力ビデオファイルのパスを指定します。
