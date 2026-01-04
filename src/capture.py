@@ -134,7 +134,9 @@ def save_to_glb(all_world_landmarks, frame_times, output_path):
         node_translations = []
         for frame_landmarks in all_world_landmarks:
             lm = frame_landmarks[i]
-            # MediaPipeの座標系 (右手系, Y下向き) からGLTF (右手系, Y上向き) へ
+            # MediaPipeの右手系ワールド座標からGLTFの右手系座標へ変換。
+            # XとZを反転させることで、カメラの前方を-Z軸とする標準的なGLTFの慣習に合わせる。
+            # 新しいTasks APIでは、Y軸はすでに上向き。
             node_translations.append([-lm.x, lm.y, -lm.z])
         all_translations.append(np.array(node_translations, dtype=np.float32))
 
