@@ -35,6 +35,28 @@
     pip install -r requirements.txt
     ```
 
+## Dockerを使った開発 (Development with Docker)
+
+Dockerを利用することで、依存関係を気にすることなく、誰でも同じ開発環境を簡単に構築できます。
+
+1.  **Dockerイメージのビルドとコンテナの起動:**
+    プロジェクトのルートディレクトリで、以下のコマンドを実行します。
+    ```bash
+    docker-compose build
+    docker-compose up -d
+    ```
+    これにより、`Dockerfile`を元にイメージがビルドされ、バックグラウンドでコンテナが起動します。
+
+2.  **コンテナ内でのコマンド実行:**
+    起動したコンテナの中で`capture.py`スクリプトを実行するには、`docker-compose exec`を使用します。
+    ```bash
+    docker-compose exec app python src/capture.py --input data/input/your_video.mp4 --output data/output/result.mp4
+    ```
+    また、コンテナのシェルにアクセスして、インタラクティブに作業することも可能です。
+    ```bash
+    docker-compose exec app /bin/bash
+    ```
+
 ## 使い方
 
 1.  **入力ビデオの準備:**

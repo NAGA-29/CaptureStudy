@@ -3,215 +3,209 @@ import mediapipe as mp
 import argparse
 import os
 import numpy as np
-from pygltflib import *
+import pygltflib
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-def process_video(input_path, output_path, output_glb_path=None, model_complexity=2):
+
+def draw_landmarks_on_image(rgb_image, detection_result):
+    """OpenCVを使って、画像にランドマークと接続線を描画する"""
+    pose_landmarks_list = detection_result.pose_landmarks
+    annotated_image = np.copy(rgb_image)
+    height, width, _ = annotated_image.shape
+
+    # ランドマークを描画
+    for pose_landmarks in pose_landmarks_list:
+        # Draw the landmarks
+        for landmark in pose_landmarks:
+            x = int(landmark.x * width)
+            y = int(landmark.y * height)
+            cv2.circle(annotated_image, (x, y), 5, (245, 117, 66), -1)
+
+    return annotated_image
+
+def process_video(model_path, input_path, output_path, output_glb_path=None):
     """
-    指定されたビデオファイルを読み込み、姿勢推定を行って結果を新しいビデオファイルに保存する。
-    オプションで、3DランドマークをGLBファイルとしてエクスポートする。
-
-    Args:
-        input_path (str): 入力ビデオファイルのパス。
-        output_path (str): 出力ビデオファイルのパス。
-        output_glb_path (str, optional): 出力GLBファイルのパス。
-        model_complexity (int, optional): モデルの複雑さ (0, 1, 2)。
+    指定されたビデオファイルを読み込み、新しいMediaPipe Tasks APIで姿勢推定を行い、
+    結果を新しいビデオファイルとオプションでGLBファイルに保存する。
     """
-    # MediaPipeの準備
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(static_image_mode=False,
-                        model_complexity=model_complexity,
-                        smooth_landmarks=True,
-                        enable_segmentation=False,
-                        min_detection_confidence=0.5,
-                        min_tracking_confidence=0.5)
-    mp_drawing = mp.solutions.drawing_utils
+    # --- MediaPipe Pose Landmarkerの初期化 ---
+    BaseOptions = mp.tasks.BaseOptions
+    PoseLandmarker = vision.PoseLandmarker
+    PoseLandmarkerOptions = vision.PoseLandmarkerOptions
+    VisionRunningMode = vision.RunningMode
 
-    # 入力ビデオの読み込み
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        print(f"Error: 入力ファイルを開けません: {input_path}")
+    # モデルのパスを解決
+    if not os.path.exists(model_path):
+        print(f"Error: モデルファイルが見つかりません: {model_path}")
         return
 
-    # ビデオのプロパティを取得
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=VisionRunningMode.VIDEO,
+        output_segmentation_masks=False  # セグメンテーションは不要
+    )
 
-    # 出力ビデオライターの準備
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    with PoseLandmarker.create_from_options(options) as landmarker:
+        # --- 入力ビデオの読み込み ---
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            print(f"Error: 入力ファイルを開けません: {input_path}")
+            return
 
-    all_world_landmarks = []
-    frame_times = []
-    frame_count = 0
+        # --- ビデオのプロパティと出力ライターの準備 ---
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    print("処理を開始します...")
+        all_world_landmarks = []
+        frame_times = []
+        frame_count = 0
 
-    while cap.isOpened():
-        success, image = cap.read()
-        if not success:
-            break
+        print("処理を開始します...")
 
-        # パフォーマンス向上のため、画像を書き込み不可に設定
-        image.flags.setflags(write=False)
-        # BGRからRGBに変換
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        while cap.isOpened():
+            success, frame = cap.read()
+            if not success:
+                break
 
-        # 姿勢推定を実行
-        results = pose.process(image_rgb)
+            # BGRからRGBに変換
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # 3Dランドマークを収集
-        if results.pose_world_landmarks:
-            all_world_landmarks.append(results.pose_world_landmarks.landmark)
-            frame_times.append(frame_count / fps)
+            # MediaPipe Imageオブジェクトに変換
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
-        frame_count += 1
+            # タイムスタンプを計算 (ミリ秒)
+            timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
 
-        # 画像を書き込み可能に戻す
-        image.flags.setflags(write=True)
+            # 姿勢推定を実行
+            detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        # 2Dランドマークを描画
-        if results.pose_landmarks:
-            mp_drawing.draw_landmarks(
-                image,
-                results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=mp_drawing.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
-                connection_drawing_spec=mp_drawing.DrawingSpec(color=(245, 66, 230), thickness=2, circle_radius=2))
+            # --- 結果の処理と保存 ---
+            if detection_result.pose_world_landmarks:
+                # 3Dワールドランドマークを収集
+                all_world_landmarks.append(detection_result.pose_world_landmarks[0]) # 最初の人のみ
+                frame_times.append(frame_count / fps)
 
-        # 出力ビデオにフレームを書き込む
-        out.write(image)
+            # 描画
+            annotated_image = draw_landmarks_on_image(frame_rgb, detection_result)
 
-    print(f"処理が完了しました。出力ファイル: {output_path}")
+            # RGBからBGRに戻して出力
+            out.write(cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
 
-    # GLBファイルを出力
-    if output_glb_path and all_world_landmarks:
-        print(f"GLBファイルを出力します: {output_glb_path}")
-        export_to_glb(all_world_landmarks, frame_times, output_glb_path)
-    elif output_glb_path:
-        print("警告: ランドマークが検出されなかったため、GLBファイルは出力されません。")
+            frame_count += 1
+
+        print(f"処理が完了しました。出力ファイル: {output_path}")
+
+        # --- GLBファイルのエクスポート ---
+        if output_glb_path and all_world_landmarks:
+            print(f"GLBファイルを出力します: {output_glb_path}")
+            save_to_glb(all_world_landmarks, frame_times, output_glb_path)
+        elif output_glb_path:
+            print("警告: ランドマークが検出されなかったため、GLBファイルは出力されません。")
+
+        # --- 後処理 ---
+        cap.release()
+        out.release()
+        cv2.destroyAllWindows()
 
 
-    # 後処理
-    pose.close()
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
-
-def export_to_glb(all_world_landmarks, frame_times, output_path):
-    """
-    収集した3DランドマークデータからGLBファイルを作成する。
-    Args:
-        all_world_landmarks (list): フレームごとのランドマークのリスト。
-        frame_times (list): 各フレームのタイムスタンプのリスト。
-        output_path (str): 出力GLBファイルのパス。
-    """
-    gltf = GLTF2()
-    scene = Scene()
+def save_to_glb(all_world_landmarks, frame_times, output_path):
+    """収集した3DランドマークデータからGLBファイルを作成する"""
+    gltf = pygltflib.GLTF2()
+    scene = pygltflib.Scene()
     gltf.scenes.append(scene)
 
-    # --- ノードとスケルトンの設定 ---
-    # MediaPipeのランドマーク名
-    landmark_names = [
-        'nose', 'left_eye_inner', 'left_eye', 'left_eye_outer', 'right_eye_inner', 'right_eye', 'right_eye_outer',
-        'left_ear', 'right_ear', 'mouth_left', 'mouth_right', 'left_shoulder', 'right_shoulder', 'left_elbow',
-        'right_elbow', 'left_wrist', 'right_wrist', 'left_pinky', 'right_pinky', 'left_index', 'right_index',
-        'left_thumb', 'right_thumb', 'left_hip', 'right_hip', 'left_knee', 'right_knee', 'left_ankle',
-        'right_ankle', 'left_heel', 'right_heel', 'left_foot_index', 'right_foot_index'
-    ]
-
-    nodes = []
-    for i, name in enumerate(landmark_names):
-        # MediaPipeの座標系は右手系、Yが下向き。GLTFは右手系、Yが上向き。
-        # YとZを反転させて調整する。
-        node = Node(name=name, translation=[0.0, 0.0, 0.0])
-        nodes.append(node)
-
+    landmark_names = [f'landmark_{i}' for i in range(33)] # ランドマーク名はシンプルに
+    nodes = [pygltflib.Node(name=name) for name in landmark_names]
     gltf.nodes.extend(nodes)
+    scene.nodes.extend(range(len(nodes))) # すべてのノードをシーンのルートに追加
 
-    # 簡単な親子関係を設定 (例: 肩 -> 肘 -> 手首)
-    # 本来は完全なスケルトン階層を定義する
-    parent_child_map = {
-        11: [13], 13: [15], 15: [17, 19, 21], # Left Arm
-        12: [14], 14: [16], 16: [18, 20, 22], # Right Arm
-        23: [25], 25: [27], 27: [29, 31],    # Left Leg
-        24: [26], 26: [28], 28: [30, 32],    # Right Leg
-        11: [12, 23], 12: [24] # Torso
-    }
-    root_nodes = []
-    all_children = set(c for children in parent_child_map.values() for c in children)
-    for i in range(len(nodes)):
-        if i not in all_children:
-            root_nodes.append(i)
-
-    scene.nodes.extend(root_nodes)
-
-    for parent_idx, children_indices in parent_child_map.items():
-        for child_idx in children_indices:
-            if child_idx < len(gltf.nodes):
-                gltf.nodes[parent_idx].children.append(child_idx)
-
-    # --- アニメーションデータ ---
-    # 1. タイムスタンプのバッファ
+    # 1. タイムスタンプのバッファデータ
     times_data = np.array(frame_times, dtype=np.float32)
     times_blob = times_data.tobytes()
-    gltf.buffers.append(Buffer(byteLength=len(times_blob)))
-    gltf.bufferViews.append(BufferView(buffer=0, byteOffset=0, byteLength=len(times_blob)))
-    times_accessor = Accessor(
-        bufferView=0, componentType=FLOAT, count=len(frame_times), type=SCALAR,
-        max=[max(frame_times)], min=[min(frame_times)]
-    )
-    gltf.accessors.append(times_accessor)
 
-    # 2. ランドマークごとのアニメーションチャネルを作成
-    animation = Animation()
-    gltf.animations.append(animation)
-
-    buffer_offset = len(times_blob)
-
+    # 2. ランドマークのトランスレーションデータ
+    translations_blob = b''
+    all_translations = []
     for i in range(len(landmark_names)):
-        # 各フレームからi番目のランドマークの座標を抽出
-        translations = []
+        node_translations = []
         for frame_landmarks in all_world_landmarks:
             lm = frame_landmarks[i]
-            # YとZを反転
-            translations.append([-lm.x, -lm.y, -lm.z])
+            # MediaPipeの座標系 (右手系, Y下向き) からGLTF (右手系, Y上向き) へ
+            node_translations.append([-lm.x, lm.y, -lm.z])
+        all_translations.append(np.array(node_translations, dtype=np.float32))
 
-        translations_data = np.array(translations, dtype=np.float32)
-        translations_blob = translations_data.tobytes()
+    # --- GLTFバッファとビューの作成 ---
+    buffer_offset = 0
+    gltf.buffers.append(pygltflib.Buffer(byteLength=0)) # 後でサイズを更新
 
-        # 既存のバッファに追記
-        gltf.buffers[0].uri += translations_blob
+    # タイムスタンプのビューとアクセサ
+    times_buffer_view = pygltflib.BufferView(buffer=0, byteOffset=buffer_offset, byteLength=len(times_blob))
+    gltf.bufferViews.append(times_buffer_view)
+    times_accessor = pygltflib.Accessor(
+        bufferView=0, componentType=pygltflib.FLOAT, count=len(frame_times), type=pygltflib.SCALAR,
+        max=[float(np.max(times_data))], min=[float(np.min(times_data))]
+    )
+    gltf.accessors.append(times_accessor)
+    buffer_offset += len(times_blob)
 
-        buffer_view_index = len(gltf.bufferViews)
-        gltf.bufferViews.append(BufferView(buffer=0, byteOffset=buffer_offset, byteLength=len(translations_blob)))
+    # アニメーションの作成
+    animation = pygltflib.Animation()
+    gltf.animations.append(animation)
 
-        accessor_index = len(gltf.accessors)
-        gltf.accessors.append(Accessor(
-            bufferView=buffer_view_index, componentType=FLOAT, count=len(translations), type=VEC3
-        ))
+    # 各ノード（ランドマーク）のアニメーションチャネルを作成
+    for i, node_translations_data in enumerate(all_translations):
+        node_translations_blob = node_translations_data.tobytes()
 
-        sampler = AnimationSampler(input=0, output=accessor_index, interpolation=LINEAR) # input=0 はタイムアクセサ
+        # トランスレーションのビューとアクセサ
+        trans_buffer_view = pygltflib.BufferView(buffer=0, byteOffset=buffer_offset, byteLength=len(node_translations_blob))
+        gltf.bufferViews.append(trans_buffer_view)
+
+        trans_accessor = pygltflib.Accessor(
+            bufferView=len(gltf.bufferViews) - 1, componentType=pygltflib.FLOAT, count=len(node_translations_data), type=pygltflib.VEC3,
+            max=np.max(node_translations_data, axis=0).tolist(),
+            min=np.min(node_translations_data, axis=0).tolist()
+        )
+        gltf.accessors.append(trans_accessor)
+        buffer_offset += len(node_translations_blob)
+
+        # サンプラー
+        sampler = pygltflib.AnimationSampler(
+            input=0, # タイムスタンプアクセサのインデックス
+            output=len(gltf.accessors) - 1, # トランスレーションアクセサのインデックス
+            interpolation=pygltflib.LINEAR
+        )
         animation.samplers.append(sampler)
 
-        channel = AnimationChannel(sampler=len(animation.samplers)-1, target=AnimationChannelTarget(node=i, path="translation"))
+        # チャネル
+        channel = pygltflib.AnimationChannel(
+            sampler=len(animation.samplers) - 1,
+            target=pygltflib.AnimationChannelTarget(node=i, path="translation")
+        )
         animation.channels.append(channel)
 
-        buffer_offset += len(translations_blob)
+    # 結合したバッファデータを作成
+    final_blob = times_blob
+    for node_translations_data in all_translations:
+        final_blob += node_translations_data.tobytes()
 
-    gltf.buffers[0].byteLength = buffer_offset
+    gltf.buffers[0].uri = final_blob
+    gltf.buffers[0].byteLength = len(final_blob)
 
     # GLBとして保存
-    gltf.convert_buffers(BufferFormat.BINARY)
+    gltf.convert_buffers(pygltflib.BufferFormat.BINARY)
     gltf.save_binary(output_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description="ビデオから姿勢推定を行い、結果を保存するスクリプト。")
+    parser.add_argument("--model", type=str, default="pose_landmarker_heavy.task", help="使用するMediaPipeモデルファイル (.task) のパス。")
     parser.add_argument("--input", type=str, required=True, help="入力ビデオファイルのパス。")
     parser.add_argument("--output", type=str, required=True, help="出力ビデオファイルのパス。")
     parser.add_argument("--output-glb", type=str, help="出力GLBアニメーションファイルのパス。")
-    parser.add_argument('--model-complexity', type=int, default=2, choices=[0, 1, 2], help="姿勢推定モデルの複雑さ (0: lite, 1: full, 2: heavy)。デフォルト: 2")
     args = parser.parse_args()
 
     # 出力ディレクトリが存在しない場合は作成
@@ -224,7 +218,7 @@ def main():
         if glb_output_dir and not os.path.exists(glb_output_dir):
             os.makedirs(glb_output_dir)
 
-    process_video(args.input, args.output, args.output_glb, args.model_complexity)
+    process_video(args.model, args.input, args.output, args.output_glb)
 
 if __name__ == '__main__':
     main()
