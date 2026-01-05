@@ -128,7 +128,6 @@ def save_to_glb(all_world_landmarks, frame_times, output_path):
     times_blob = times_data.tobytes()
 
     # 2. ランドマークのトランスレーションデータ
-    translations_blob = b''
     all_translations = []
     for i in range(len(landmark_names)):
         node_translations = []
