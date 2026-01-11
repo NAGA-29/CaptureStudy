@@ -63,8 +63,9 @@ def process_video(model_path, input_path, output_path, output_glb_path=None):
         all_world_landmarks = []
         frame_times = []
         frame_count = 0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        print("処理を開始します...")
+        print(f"処理を開始します... (総フレーム数: {total_frames})")
 
         while cap.isOpened():
             success, frame = cap.read()
@@ -97,6 +98,12 @@ def process_video(model_path, input_path, output_path, output_glb_path=None):
 
             frame_count += 1
 
+            # 進捗表示（10フレームごと）
+            if frame_count % 10 == 0 or frame_count == total_frames:
+                progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
+                print(f"\r処理中: {frame_count}/{total_frames} フレーム ({progress:.1f}%)", end="", flush=True)
+
+        print()  # 改行
         print(f"処理が完了しました。出力ファイル: {output_path}")
 
         # --- GLBファイルのエクスポート ---
