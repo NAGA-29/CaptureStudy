@@ -37,18 +37,24 @@ def draw_landmarks_on_image(rgb_image, pose_landmarks_list, visibility_threshold
     return annotated_image
 
 
-def preprocess_frame(frame_rgb, enable_clahe=False):
+def preprocess_frame(frame_rgb, clahe=None):
     """暗所・低コントラスト動画向けの前処理。
 
     LAB 色空間の L チャネルに CLAHE をかけ、色相を壊さずに局所コントラストを
     改善する。検出器の事前処理（リサイズ等）は MediaPipe 側で行うため、
     ここではコントラストのみを扱う。
+
+    Parameters
+    ----------
+    frame_rgb : np.ndarray
+        入力フレーム（RGB）。
+    clahe : cv2.CLAHE or None
+        呼び出し元で生成済みの CLAHE オブジェクト。None の場合は変換なしで返す。
     """
-    if not enable_clahe:
+    if clahe is None:
         return frame_rgb
     lab = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2LAB)
     l_channel, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     l_channel = clahe.apply(l_channel)
     lab = cv2.merge((l_channel, a, b))
     return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
@@ -128,6 +134,9 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+        # CLAHE インスタンスを一度だけ生成して使い回す（フレーム毎の生成コストを避ける）
+        clahe_obj = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if enable_clahe else None
+
         all_world_landmarks = []
         frame_times = []
         frame_count = 0
@@ -144,7 +153,7 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
 
             # BGRからRGBに変換 + オプションで CLAHE による前処理
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_for_detect = preprocess_frame(frame_rgb, enable_clahe=enable_clahe)
+            frame_for_detect = preprocess_frame(frame_rgb, clahe=clahe_obj)
 
             # MediaPipe Imageオブジェクトに変換
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_for_detect)
