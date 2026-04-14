@@ -7,35 +7,68 @@ import pygltflib
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+from filters import PoseLandmarkSmoother
 
-def draw_landmarks_on_image(rgb_image, detection_result):
-    """OpenCVを使って、画像にランドマークと接続線を描画する"""
-    pose_landmarks_list = detection_result.pose_landmarks
+
+def draw_landmarks_on_image(rgb_image, pose_landmarks_list, visibility_threshold=0.0):
+    """OpenCVを使って、画像にランドマークと接続線を描画する。
+
+    Parameters
+    ----------
+    pose_landmarks_list : list
+        `NormalizedLandmark` または `SmoothedLandmark` のリストのリスト。
+    visibility_threshold : float
+        これ未満の可視性を持つランドマークは薄く描画する。
+    """
     annotated_image = np.copy(rgb_image)
     height, width, _ = annotated_image.shape
 
-    # ランドマークを描画
     for pose_landmarks in pose_landmarks_list:
-        # Draw the landmarks
         for landmark in pose_landmarks:
             x = int(landmark.x * width)
             y = int(landmark.y * height)
-            cv2.circle(annotated_image, (x, y), 5, (245, 117, 66), -1)
+            vis = float(getattr(landmark, "visibility", 1.0))
+            if vis < visibility_threshold:
+                # 信頼度が低い点は暗めの色で描画して視覚的に区別する。
+                cv2.circle(annotated_image, (x, y), 3, (120, 120, 120), -1)
+            else:
+                cv2.circle(annotated_image, (x, y), 5, (245, 117, 66), -1)
 
     return annotated_image
 
+
+def preprocess_frame(frame_rgb, enable_clahe=False):
+    """暗所・低コントラスト動画向けの前処理。
+
+    LAB 色空間の L チャネルに CLAHE をかけ、色相を壊さずに局所コントラストを
+    改善する。検出器の事前処理（リサイズ等）は MediaPipe 側で行うため、
+    ここではコントラストのみを扱う。
+    """
+    if not enable_clahe:
+        return frame_rgb
+    lab = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    lab = cv2.merge((l, a, b))
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
 def process_video(model_path, input_path, output_path, output_glb_path=None,
-                   min_detection_confidence=0.5, min_tracking_confidence=0.5,
-                   num_poses=1, smooth_landmarks=True):
+                   min_detection_confidence=0.6, min_tracking_confidence=0.6,
+                   min_presence_confidence=0.6,
+                   num_poses=1, smooth_landmarks=True,
+                   smooth_min_cutoff=1.0, smooth_beta=0.1,
+                   visibility_threshold=0.5,
+                   max_hold_frames=10, enable_clahe=False):
     """
     指定されたビデオファイルを読み込み、新しいMediaPipe Tasks APIで姿勢推定を行い、
     結果を新しいビデオファイルとオプションでGLBファイルに保存する。
-    
-    Args:
-        min_detection_confidence: 検出信頼度の閾値 (0.0-1.0)。高いほど厳格。
-        min_tracking_confidence: トラッキング信頼度の閾値 (0.0-1.0)。高いほど厳格。
-        num_poses: 検出する人数の上限。
-        smooth_landmarks: ランドマークのスムージングを有効にするか。
+
+    精度向上のため以下の後処理を掛ける:
+      - OneEuroFilter による各ランドマーク座標の時間方向平滑化。
+      - visibility が閾値未満の点は前フレーム値を保持（hold-last）。
+      - 検出失敗フレームは直前フレームを再利用してタイムラインを維持。
+      - CLAHE による入力フレームの局所コントラスト補正（オプション）。
     """
     # --- MediaPipe Pose Landmarkerの初期化 ---
     BaseOptions = mp.tasks.BaseOptions
@@ -50,18 +83,33 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
 
     print(f"精度設定:")
     print(f"  - 検出信頼度閾値: {min_detection_confidence}")
+    print(f"  - プレゼンス信頼度閾値: {min_presence_confidence}")
     print(f"  - トラッキング信頼度閾値: {min_tracking_confidence}")
     print(f"  - 検出人数上限: {num_poses}")
-    print(f"  - スムージング: {'有効' if smooth_landmarks else '無効'}")
+    print(f"  - スムージング: {'有効' if smooth_landmarks else '無効'}"
+          f" (min_cutoff={smooth_min_cutoff}, beta={smooth_beta})")
+    print(f"  - 可視性しきい値: {visibility_threshold}")
+    print(f"  - 欠損保持フレーム上限: {max_hold_frames}")
+    print(f"  - CLAHE 前処理: {'有効' if enable_clahe else '無効'}")
 
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
         running_mode=VisionRunningMode.VIDEO,
         output_segmentation_masks=False,
         min_pose_detection_confidence=min_detection_confidence,
-        min_pose_presence_confidence=min_detection_confidence,
+        min_pose_presence_confidence=min_presence_confidence,
         min_tracking_confidence=min_tracking_confidence,
         num_poses=num_poses
+    )
+
+    # world 用と画面座標用でフィルタ状態を分ける。
+    world_smoother = PoseLandmarkSmoother(
+        min_cutoff=smooth_min_cutoff, beta=smooth_beta,
+        visibility_threshold=visibility_threshold,
+    )
+    image_smoother = PoseLandmarkSmoother(
+        min_cutoff=smooth_min_cutoff, beta=smooth_beta,
+        visibility_threshold=visibility_threshold,
     )
 
     with PoseLandmarker.create_from_options(options) as landmarker:
@@ -75,12 +123,16 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 30.0
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
         all_world_landmarks = []
         frame_times = []
         frame_count = 0
+        missed_streak = 0
+        total_missed = 0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         print(f"処理を開始します... (総フレーム数: {total_frames})")
@@ -90,26 +142,63 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
             if not success:
                 break
 
-            # BGRからRGBに変換
+            # BGRからRGBに変換 + オプションで CLAHE による前処理
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_for_detect = preprocess_frame(frame_rgb, enable_clahe=enable_clahe)
 
             # MediaPipe Imageオブジェクトに変換
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_for_detect)
 
-            # タイムスタンプを計算 (ミリ秒)
-            timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+            # タイムスタンプは単調増加が必須なのでフレーム番号から計算する
+            # (CAP_PROP_POS_MSEC は一部コンテナで 0 を返すことがある)
+            t_sec = frame_count / fps
+            timestamp_ms = int(t_sec * 1000)
 
             # 姿勢推定を実行
             detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            # --- 結果の処理と保存 ---
-            if detection_result.pose_world_landmarks:
-                # 3Dワールドランドマークを収集
-                all_world_landmarks.append(detection_result.pose_world_landmarks[0]) # 最初の人のみ
-                frame_times.append(frame_count / fps)
+            # --- 後段スムージング ---
+            world_raw = (detection_result.pose_world_landmarks[0]
+                         if detection_result.pose_world_landmarks else None)
+            image_raw = (detection_result.pose_landmarks[0]
+                         if detection_result.pose_landmarks else None)
 
-            # 描画
-            annotated_image = draw_landmarks_on_image(frame_rgb, detection_result)
+            if world_raw is not None:
+                missed_streak = 0
+                if smooth_landmarks:
+                    world_smoothed = world_smoother.smooth(world_raw, t_sec)
+                else:
+                    world_smoothed = list(world_raw)
+            else:
+                missed_streak += 1
+                total_missed += 1
+                # 直前フレームを保持して時間軸のズレを防ぐ（連続失敗が上限内の場合のみ）
+                if (smooth_landmarks and world_smoother.has_history
+                        and missed_streak <= max_hold_frames):
+                    world_smoothed = world_smoother.hold()
+                else:
+                    world_smoothed = None
+
+            if image_raw is not None and smooth_landmarks:
+                image_smoothed = image_smoother.smooth(image_raw, t_sec)
+            elif image_raw is not None:
+                image_smoothed = list(image_raw)
+            elif (smooth_landmarks and image_smoother.has_history
+                    and missed_streak <= max_hold_frames):
+                image_smoothed = image_smoother.hold()
+            else:
+                image_smoothed = None
+
+            # --- GLB 用のランドマーク蓄積 ---
+            if world_smoothed is not None:
+                all_world_landmarks.append(world_smoothed)
+                frame_times.append(t_sec)
+
+            # --- 描画 ---
+            landmarks_for_draw = [image_smoothed] if image_smoothed is not None else []
+            annotated_image = draw_landmarks_on_image(
+                frame_rgb, landmarks_for_draw, visibility_threshold=visibility_threshold,
+            )
 
             # RGBからBGRに戻して出力
             out.write(cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
@@ -123,6 +212,8 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
 
         print()  # 改行
         print(f"処理が完了しました。出力ファイル: {output_path}")
+        if total_missed > 0:
+            print(f"  - 検出失敗: {total_missed}/{frame_count} フレーム (補間/スキップ済み)")
 
         # --- GLBファイルのエクスポート ---
         if output_glb_path and all_world_landmarks:
@@ -739,14 +830,26 @@ def main():
     parser.add_argument("--output-glb", type=str, help="出力GLBアニメーションファイルのパス。")
     
     # 精度向上オプション
-    parser.add_argument("--min-detection-confidence", type=float, default=0.5,
-                        help="検出信頼度の閾値 (0.0-1.0)。高いほど検出が厳格になります。デフォルト: 0.5")
-    parser.add_argument("--min-tracking-confidence", type=float, default=0.5,
-                        help="トラッキング信頼度の閾値 (0.0-1.0)。高いほどトラッキングが厳格になります。デフォルト: 0.5")
+    parser.add_argument("--min-detection-confidence", type=float, default=0.6,
+                        help="検出信頼度の閾値 (0.0-1.0)。高いほど検出が厳格になります。デフォルト: 0.6")
+    parser.add_argument("--min-presence-confidence", type=float, default=0.6,
+                        help="ポーズ存在信頼度の閾値 (0.0-1.0)。デフォルト: 0.6")
+    parser.add_argument("--min-tracking-confidence", type=float, default=0.6,
+                        help="トラッキング信頼度の閾値 (0.0-1.0)。高いほどトラッキングが厳格になります。デフォルト: 0.6")
     parser.add_argument("--num-poses", type=int, default=1,
                         help="検出する人数の上限。デフォルト: 1")
     parser.add_argument("--no-smooth", action="store_true",
-                        help="ランドマークのスムージングを無効にする")
+                        help="OneEuroFilter によるランドマーク平滑化を無効にする")
+    parser.add_argument("--smooth-min-cutoff", type=float, default=1.0,
+                        help="OneEuroFilter の min_cutoff (Hz)。下げると静止時のジッタが減る。デフォルト: 1.0")
+    parser.add_argument("--smooth-beta", type=float, default=0.1,
+                        help="OneEuroFilter の beta。上げると高速移動時の追従性が増す。デフォルト: 0.1")
+    parser.add_argument("--visibility-threshold", type=float, default=0.5,
+                        help="この値未満の可視性を持つランドマークは前フレーム値を保持する。デフォルト: 0.5")
+    parser.add_argument("--max-hold-frames", type=int, default=10,
+                        help="検出失敗が連続した場合に前フレームを再利用する最大フレーム数。デフォルト: 10")
+    parser.add_argument("--clahe", action="store_true",
+                        help="入力フレームに CLAHE を適用して低コントラスト動画での検出率を上げる")
     args = parser.parse_args()
 
     # 出力ディレクトリが存在しない場合は作成
@@ -763,8 +866,14 @@ def main():
         args.model, args.input, args.output, args.output_glb,
         min_detection_confidence=args.min_detection_confidence,
         min_tracking_confidence=args.min_tracking_confidence,
+        min_presence_confidence=args.min_presence_confidence,
         num_poses=args.num_poses,
-        smooth_landmarks=not args.no_smooth
+        smooth_landmarks=not args.no_smooth,
+        smooth_min_cutoff=args.smooth_min_cutoff,
+        smooth_beta=args.smooth_beta,
+        visibility_threshold=args.visibility_threshold,
+        max_hold_frames=args.max_hold_frames,
+        enable_clahe=args.clahe,
     )
 
 if __name__ == '__main__':
