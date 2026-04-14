@@ -175,7 +175,7 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
                 # 直前フレームを保持して時間軸のズレを防ぐ（連続失敗が上限内の場合のみ）
                 if (smooth_landmarks and world_smoother.has_history
                         and missed_streak <= max_hold_frames):
-                    world_smoothed = world_smoother.hold()
+                    world_smoothed = world_smoother.hold(t_sec)
                 else:
                     world_smoothed = None
 
@@ -185,7 +185,7 @@ def process_video(model_path, input_path, output_path, output_glb_path=None,
                 image_smoothed = list(image_raw)
             elif (smooth_landmarks and image_smoother.has_history
                     and missed_streak <= max_hold_frames):
-                image_smoothed = image_smoother.hold()
+                image_smoothed = image_smoother.hold(t_sec)
             else:
                 image_smoothed = None
 

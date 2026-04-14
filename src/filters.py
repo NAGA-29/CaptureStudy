@@ -152,10 +152,20 @@ class PoseLandmarkSmoother:
         self._last = out
         return out
 
-    def hold(self) -> list[SmoothedLandmark] | None:
-        """検出失敗時に前フレームをそのまま再利用する。"""
+    def hold(self, t: float) -> list[SmoothedLandmark] | None:
+        """検出失敗時に前フレームをそのまま再利用しつつ、内部フィルタの時刻状態を進める。
+
+        各軸フィルタへ直前の値を入力して `_t_prev` を `t` に更新することで、
+        欠損区間後に検出が復帰した際の速度過小評価（追従遅延）を防ぐ。
+        出力値は前フレームの平滑値をそのまま返す。
+        """
         if self._last is None:
             return None
+        for i, lm in enumerate(self._last):
+            fx, fy, fz = self._filters[i]
+            fx(lm.x, t)
+            fy(lm.y, t)
+            fz(lm.z, t)
         return [SmoothedLandmark(p.x, p.y, p.z, p.visibility, p.presence) for p in self._last]
 
 
