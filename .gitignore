@@ -3,3 +3,6 @@
 
 *.mp4
 *.glb
+
+__pycache__/
+*.pyc
